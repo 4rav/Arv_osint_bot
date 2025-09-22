@@ -1,76 +1,54 @@
-import os, re, json, io, time, logging, asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from osint_client import lookup_number
+import requests
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ParseMode
+from aiogram.utils import executor
+import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Telegram Bot Token ---
+API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Set this in Render Environment Variables
 
-TELE_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TELE_TOKEN:
-    logger.error("TELEGRAM_TOKEN not set in env")
-    raise SystemExit("TELEGRAM_TOKEN missing")
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-COOLDOWN = int(os.getenv("COOLDOWN_SECONDS", "3"))
-_last_req = {}
-PHONE_RE = re.compile(r"^\+?\d{6,15}$")
-MAX_MESSAGE_CHARS = 3900
+# --- Command /start ---
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.reply("👋 Hello! Send me a mobile number to get OSINT report.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hi — send /lookup <phone-number> (international digits).")
+# --- Handler for mobile numbers ---
+@dp.message_handler()
+async def fetch_info(message: types.Message):
+    mobile = message.text.strip()
+    url = f"https://swapi-num-api.onrender.com/info?api_key=swapipy&mobile={mobile}"
 
-def _format(result):
-    if isinstance(result, dict) and "raw" in result and len(result)==1:
-        return result["raw"]
     try:
-        return json.dumps(result, indent=2, ensure_ascii=False)
-    except Exception:
-        return str(result)
-
-async def lookup_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    now = time.time()
-    last = _last_req.get(uid, 0)
-    if now - last < COOLDOWN:
-        await update.message.reply_text(f"Please wait a few seconds between requests.")
-        return
-    _last_req[uid] = now
-
-    if not context.args:
-        await update.message.reply_text("Usage: /lookup <phone-number>")
-        return
-    number = context.args[0].strip()
-    if not re.match(r"^\+?\d{6,15}$", number):
-        await update.message.reply_text("Invalid number format. Use only digits, optional leading +.")
+        response = requests.get(url, timeout=10)
+        data = response.json()
+    except Exception as e:
+        await message.reply(f"❌ Error fetching data: {e}")
         return
 
-    await update.message.reply_text("Looking up...")
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lookup_number, number)
-
-    if isinstance(result, dict) and result.get("error"):
-        await update.message.reply_text(f"API error: {result}")
-        logger.warning("API error for %s -> %s", number, result)
+    result = data.get("data", [])
+    if not result:
+        await message.reply("❌ No matching records found in the OSINT database.")
         return
 
-    text = _format(result)
-    if len(text) <= MAX_MESSAGE_CHARS:
-        await update.message.reply_text(text)
-    else:
-        bio = io.BytesIO(text.encode("utf-8"))
-        bio.name = f"{number}_result.json"
-        await update.message.reply_document(document=bio)
+    msg = "📑 *OSINT Intelligence Report*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━\n\n"
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Commands:\n/lookup <number>")
+    for entry in result:
+        msg += f"👤 *Name:* `{entry.get('name','N/A')}`\n"
+        msg += f"👨‍👦 *Father’s Name:* `{entry.get('fname','N/A')}`\n"
+        msg += f"📱 *Primary Mobile:* `{entry.get('mobile','N/A')}`\n"
+        msg += f"☎️ *Alternate Mobile:* `{entry.get('alt','N/A')}`\n"
+        msg += f"🏠 *Residential Address:* `{entry.get('address','N/A')}`\n"
+        msg += f"🌍 *Circle / Region:* `{entry.get('circle','N/A')}`\n"
+        msg += "━━━━━━━━━━━━━━━━━━━\n\n"
 
-def main():
-    app = ApplicationBuilder().token(TELE_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("lookup", lookup_handler))
-    app.add_handler(CommandHandler("help", help_cmd))
-    logger.info("Starting bot (polling)...")
-    app.run_polling()
+    msg += "✅ *Report Generated Successfully*\n"
+    msg += "_Confidential OSINT Data — For Investigative Use Only_"
 
-if __name__ == "__main__":
-    main()
+    await message.reply(msg, parse_mode=ParseMode.MARKDOWN)
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
